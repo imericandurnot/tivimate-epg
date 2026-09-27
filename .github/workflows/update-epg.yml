@@ -1,0 +1,71 @@
+name: Update TiviMate EPG
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 */6 * * *'
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install XML processing library
+        run: pip install lxml
+
+      - name: Download and merge EPG files
+        run: |
+          mkdir -p docs
+          cat > /tmp/merge.py <<'PY'
+          import gzip
+          import urllib.request
+          from lxml import etree
+
+          base = "https://www.open-epg.com/files/unitedstates{}.xml.gz"
+          seen = set()
+
+          with gzip.open("docs/guide.xml.gz", "wb", compresslevel=6) as output:
+              with etree.xmlfile(output, encoding="UTF-8") as xml:
+                  xml.write_declaration()
+                  with xml.element("tv", attrib={"generator-info-name": "TiviMate EPG Merger"}):
+                      for number in range(1, 12):
+                          url = base.format(number)
+                          print(f"Processing source {number}: {url}", flush=True)
+                          request = urllib.request.Request(
+                              url, headers={"User-Agent": "Mozilla/5.0"}
+                          )
+                          with urllib.request.urlopen(request, timeout=120) as response:
+                              with gzip.GzipFile(fileobj=response) as source:
+                                  context = etree.iterparse(
+                                      source, events=("end",),
+                                      tag=("channel", "programme"),
+                                      huge_tree=True
+                                  )
+                                  for _, element in context:
+                                      if element.tag == "channel":
+                                          channel_id = element.get("id")
+                                          if channel_id and channel_id not in seen:
+                                              xml.write(element)
+                                              seen.add(channel_id)
+                                      else:
+                                          xml.write(element)
+                                      element.clear()
+                                      while element.getprevious() is not None:
+                                          del element.getparent()[0]
+                          print(f"Finished source {number}", flush=True)
+          print(f"Merged {len(seen)} unique channel IDs")
+          PY
+          python /tmp/merge.py
+
+      - name: Publish combined EPG
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/guide.xml.gz
+          git diff --cached --quiet || (git commit -m "Update combined EPG" && git push)
+          
